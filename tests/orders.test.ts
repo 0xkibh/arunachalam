@@ -1,0 +1,12 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {seed,checkout,slots,price,transition,read,save} from '../lib/store';
+process.env.DEMO_DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'arunachalam-test-'));
+const line={id:'8',quantity:2,spice:'medium',size:'large',addon:'rice',notes:'Test only'};
+test('server prices options and quantity, ignores client price',()=>{const items=price([{...line,price:1} as any],seed());assert.equal(items.reduce((s,l)=>s+l.unit*l.quantity,0),3560);assert.throws(()=>price([{...line,id:'19'}],seed()));});
+test('duplicate submission returns the original order',()=>{const db=seed();const input={key:'test-idempotency-key',lines:[line],customer:{name:'Demo',phone:'09012345678',email:''},pickup:slots(db)[0]};const a=checkout(db,input);const b=checkout(db,input);assert.equal(a.token,b.token);assert.equal(db.orders.length,1);assert.equal(a.payment,'authorized');transition(db,a.token,'accept','',slots(db)[0]);assert.equal(a.payment,'captured');assert.throws(()=>transition(db,a.token,'accept'));transition(db,a.token,'prepare');transition(db,a.token,'ready');transition(db,a.token,'cancel','Customer cancelled');assert.equal(a.payment,'refunded');assert.throws(()=>transition(db,a.token,'collect'));});
+test('failure, pause and availability block order creation',()=>{const db=seed();const input={key:'another-unique-key',lines:[line],customer:{name:'Demo',phone:'09012345678',email:''},pickup:slots(db)[0]};assert.throws(()=>checkout(db,{...input,fail:true}),/payment/);assert.equal(db.orders.length,0);db.paused=true;assert.throws(()=>checkout(db,input),/paused/);db.paused=false;db.soldOut.push('8');assert.throws(()=>checkout(db,input),/unavailable/);});
+test('rejection and acceptance timeout release authorization',()=>{const db=seed();const input={key:'timeout-unique-key',lines:[line],customer:{name:'Demo',phone:'09012345678',email:''},pickup:slots(db)[0]};const a=checkout(db,input);transition(db,a.token,'reject','Kitchen busy');assert.equal(a.payment,'released');const b=checkout(db,{...input,key:'timeout-second-key'});b.created=Date.now()-16*60000;save(db);assert.equal(read().orders[1].state,'expired');assert.equal(read().orders[1].payment,'released');});
